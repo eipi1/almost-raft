@@ -1,4 +1,4 @@
-#almost-raft
+# almost-raft
 Consensus or agreeing on some value is a fundamental issue in a distributed system. 
 While there are algorithms like Paxos exists since long back, the complexity of those 
 make implementation complicated.
