@@ -1,6 +1,6 @@
 use crate::{log_error, Message, Node, NodeState};
 use futures_util::stream::FuturesUnordered;
-use log::{debug, error, trace};
+use log::{debug, error, info, trace};
 use rand::Rng;
 
 use std::cmp::min;
@@ -90,10 +90,14 @@ impl<T: Node> RaftElectionState<T> {
 /// Start the election process.
 /// Note that, the function has a infinite loop, so will never return.
 pub async fn raft_election<T: Node + Debug>(mut state: RaftElectionState<T>) {
+    info!("[node: {}] starting election process...", &state.self_id);
     let incoming = state.incoming_rx.clone();
     let mut remaining_election_timeout = state.election_timeout;
     let mut remaining_heartbeat_interval = state.heartbeat_interval;
     loop {
+        if matches!(&state.node_state, NodeState::Terminating) {
+            break;
+        }
         let instant = Instant::now();
         let current_timeout = get_current_timeout(
             remaining_heartbeat_interval,
@@ -112,11 +116,6 @@ pub async fn raft_election<T: Node + Debug>(mut state: RaftElectionState<T>) {
             msg_or_timeout.await
         };
         let elapsed = instant.elapsed().as_millis() as u64;
-        trace!(
-            "[node: {}] msg_or_timeout: elapsed {}",
-            &state.self_id,
-            &elapsed
-        );
         if state.node_state == NodeState::Leader {
             // this block can be reached for two reasons
             // 1. heartbeat timeout => send heartbeat
@@ -129,7 +128,8 @@ pub async fn raft_election<T: Node + Debug>(mut state: RaftElectionState<T>) {
                 remaining_heartbeat_interval = state.heartbeat_interval;
             } else {
                 // case#2: received message or something
-                remaining_heartbeat_interval -= elapsed;
+                remaining_heartbeat_interval =
+                    unsigned_subtract(remaining_election_timeout, elapsed);
             }
             // continue;
         }
@@ -261,6 +261,12 @@ async fn handle_after_timeout<T: Node + Debug>(state: &mut RaftElectionState<T>)
             "[node: {}] updating node state to NodeState::Candidate",
             &state.self_id
         );
+        trace!(
+            "[node: {}] updating term from {} to {}",
+            &state.self_id,
+            &state.term,
+            state.term + 1
+        );
         state.term += 1;
         state.node_state = NodeState::Candidate;
         //self vote
@@ -330,12 +336,21 @@ async fn handle_message<T: Node + Debug>(
     heartbeat
 }
 
-#[inline(always)]
+#[inline]
 fn handle_remove_node<T: Node>(state: &mut RaftElectionState<T>, node: T) {
+    if node.node_id() == &state.self_id {
+        info!("[node: {}] terminating node", &state.self_id);
+        state.node_state = NodeState::Terminating;
+    }
     let mut found_at = usize::MAX;
     for (idx, peer) in state.peers.iter().enumerate() {
         if peer.node_id() == node.node_id() {
             found_at = idx;
+            info!(
+                "[node: {}] removing node {}",
+                &state.self_id,
+                node.node_id()
+            );
             break;
         }
     }
@@ -380,17 +395,23 @@ async fn handle_heartbeat<T: Node>(
             return;
         }
     }
+
+    //todo review the necessity of the voted_for_term
+    state.voted_for_term = true;
     state.term = term;
     state.has_leader = true;
     if let Some(current_leader_node) = &state.leader_node {
         if current_leader_node == &leader_node_id {
+            //leader hasn't changed
             return;
         }
     }
+    trace!("[node: {}] updating term to {}", &state.self_id, &term);
     debug!(
         "[node: {}] leader changed to node: {}",
         &state.self_id, &leader_node_id
     );
+    //only node with higher term will get vote
     state.leader_node = Some(leader_node_id.clone());
     let result = state
         .tx
@@ -407,14 +428,34 @@ async fn handle_request_vote<T: Node>(
     requester_node_id: String,
     term: usize,
 ) {
-    if state.term >= term {
+    if matches!(state.node_state, NodeState::Candidate) {
+        trace!(
+            "[node: {}] already a candidate node, don't vote",
+            &state.self_id
+        );
         return;
     }
-    state.term = term;
-    if !state.voted_for_term {
-        state.voted_for_term = true;
-        send_vote(state, requester_node_id, term).await;
+    if state.term > term {
+        trace!(
+            "[node: {}] term is not high enough; current term: {}, requester: {}",
+            &state.self_id,
+            state.term,
+            term
+        );
+        return;
+    } else if state.term == term && state.voted_for_term {
+        trace!("Already voted for the term: {}", &term);
+        return;
     }
+    trace!(
+        "[node: {}] updating term from {} to {}",
+        &state.self_id,
+        &state.term,
+        &term
+    );
+    state.term = term;
+    state.voted_for_term = true;
+    send_vote(state, requester_node_id, term).await;
 }
 
 async fn send_vote<T: Node>(
@@ -425,7 +466,7 @@ async fn send_vote<T: Node>(
     for peer in state.peers.iter() {
         if peer.node_id() == &requester_node_id {
             trace!(
-                "[node: {}, term: {}] sending vote to node: {}, for term: {}",
+                "[node: {}] current term: {}, sending vote to node: {}, for term: {}",
                 &state.self_id,
                 state.term,
                 &requester_node_id,
@@ -703,8 +744,7 @@ mod test {
     async fn test_raft_election_multi_node() {
         setup();
         let nodes: Vec<NodeDummy> = vec![];
-        let (heartbeat_interval, message_timeout, timeout, max_node, min_node) =
-            (20, 2, 50, 5, 2);
+        let (heartbeat_interval, message_timeout, timeout, max_node, min_node) = (20, 2, 50, 5, 2);
 
         let election_timeout_1 = 60;
         let (mut from_raft_node_1, self_id_1, state_1, tx_to_raft_node_1) =

@@ -104,6 +104,8 @@ pub enum NodeState {
     Candidate,
     /// Node won the election with majority votes and became leader
     Leader,
+    /// Node is terminating
+    Terminating,
 }
 
 /// A Cluster node
@@ -132,7 +134,7 @@ pub enum Message<T> {
     HeartBeat { leader_node_id: String, term: usize },
     /// Add a new node
     ControlAddNode(T),
-    /// Remove an existing node
+    /// Remove an existing node, removing self will cause node termination
     ControlRemoveNode(T),
     /// A leader has been elected or change of existing one
     ControlLeaderChanged(String),
