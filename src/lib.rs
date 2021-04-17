@@ -89,6 +89,8 @@
 //! ```
 //!
 
+#![warn(missing_docs)]
+
 /// handles election process
 pub mod election;
 
@@ -126,12 +128,23 @@ pub enum Message<T> {
     RequestVote {
         /// Sender node id
         node_id: String,
+        /// raft election term
         term: usize
     },
     /// Message in response to `Message::RequestVote`
-    RequestVoteResponse { term: usize, vote: bool },
+    RequestVoteResponse {
+        /// raft election term for which the vote was requested for
+        term: usize,
+        /// Is voting for the `term`
+        vote: bool
+    },
     /// Heartbeat message
-    HeartBeat { leader_node_id: String, term: usize },
+    HeartBeat {
+        /// Current leader, i.e. message sender's node ID
+        leader_node_id: String,
+        /// Term of the leader
+        term: usize
+    },
     /// Add a new node
     ControlAddNode(T),
     /// Remove an existing node, removing self will cause node termination

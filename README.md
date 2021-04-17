@@ -1,3 +1,7 @@
+![Build](https://github.com/eipi1/almost-raft/actions/workflows/rust.yml/badge.svg)
+[![Crates.io][crates-badge]][crates-url]
+[![MIT licensed][mit-badge]][mit-url]
+
 # almost-raft
 Consensus or agreeing on some value is a fundamental issue in a distributed system. 
 While there are algorithms like Paxos exists since long back, the complexity of those 
@@ -12,8 +16,8 @@ Raft tackles the problem in two steps -
 For more on Raft [https://raft.github.io](https://raft.github.io).
 
 ## Why almost-raft
-There is already an implementation of Raft in Rust by awesome people at tikv. If the complete raft is the requirement, 
-check out the [tikv/raft-rs](https://github.com/tikv/raft-rs).
+There is already an implementation of Raft in Rust by awesome people at tikv. If the complete 
+raft is the requirement, check out the [tikv/raft-rs](https://github.com/tikv/raft-rs).
 
 *almost-raft* was written with a few things in mind -
 * Personal necessity, of course
@@ -95,3 +99,7 @@ Raft will notify through mpsc channel if there's any change in leadership. To re
 from_raft.recv().await;
 ```
 
+[crates-badge]: https://img.shields.io/crates/v/almost-raft.svg
+[crates-url]: https://crates.io/crates/cluster-mode
+[mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
+[mit-url]: https://github.com/tokio-rs/tokio/blob/master/LICENSE
