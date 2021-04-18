@@ -89,6 +89,8 @@
 //! ```
 //!
 
+#![warn(missing_docs)]
+
 /// handles election process
 pub mod election;
 
@@ -104,6 +106,8 @@ pub enum NodeState {
     Candidate,
     /// Node won the election with majority votes and became leader
     Leader,
+    /// Node is terminating
+    Terminating,
 }
 
 /// A Cluster node
@@ -124,15 +128,26 @@ pub enum Message<T> {
     RequestVote {
         /// Sender node id
         node_id: String,
+        /// raft election term
         term: usize
     },
     /// Message in response to `Message::RequestVote`
-    RequestVoteResponse { term: usize, vote: bool },
+    RequestVoteResponse {
+        /// raft election term for which the vote was requested for
+        term: usize,
+        /// Is voting for the `term`
+        vote: bool
+    },
     /// Heartbeat message
-    HeartBeat { leader_node_id: String, term: usize },
+    HeartBeat {
+        /// Current leader, i.e. message sender's node ID
+        leader_node_id: String,
+        /// Term of the leader
+        term: usize
+    },
     /// Add a new node
     ControlAddNode(T),
-    /// Remove an existing node
+    /// Remove an existing node, removing self will cause node termination
     ControlRemoveNode(T),
     /// A leader has been elected or change of existing one
     ControlLeaderChanged(String),
