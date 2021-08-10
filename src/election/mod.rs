@@ -558,7 +558,7 @@ mod test {
         let handle = tokio::spawn(raft_election(state));
         trace!("{}", timeout);
         task::yield_now().await;
-        advance(Duration::from_millis(timeout)).await;
+        advance(d!(timeout)).await;
         let (tx_node, mut rx_node) = channel(10);
 
         // add node
@@ -567,7 +567,7 @@ mod test {
         let dummy = new_node("2", tx_node.clone());
         tx.send(Message::ControlAddNode(dummy)).await;
         task::yield_now().await;
-        advance(d!(10)).await;
+        advance(d!(timeout)).await;
         resume();
         // not enough node, shouldn't be any request for vote
         let result = tokio::time::timeout(Duration::from_millis(5), rx_node.recv()).await;
@@ -577,7 +577,7 @@ mod test {
         let dummy = new_node("3", tx_node.clone());
         tx.send(Message::ControlAddNode(dummy)).await;
         task::yield_now().await;
-        advance(d!(10)).await;
+        advance(d!(timeout)).await;
         resume();
         // enough node, node should get request for vote
         let result = tokio::time::timeout(Duration::from_millis(5), rx_node.recv()).await;

@@ -119,6 +119,12 @@ pub trait Node {
     async fn send_message(&self, msg: Message<Self::NodeType>);
     /// unique node identifier
     fn node_id(&self) -> &String;
+
+    /// Provide implementation to get id provided by service discovery provider(e.g. Kubernetes).
+    /// By default this function is an alias to [`Self::node_id`]
+    fn service_instance_id(&self) -> &String {
+        self.node_id()
+    }
 }
 
 /// Messages to communicate with Raft
@@ -129,21 +135,21 @@ pub enum Message<T> {
         /// Sender node id
         node_id: String,
         /// raft election term
-        term: usize
+        term: usize,
     },
     /// Message in response to `Message::RequestVote`
     RequestVoteResponse {
         /// raft election term for which the vote was requested for
         term: usize,
         /// Is voting for the `term`
-        vote: bool
+        vote: bool,
     },
     /// Heartbeat message
     HeartBeat {
         /// Current leader, i.e. message sender's node ID
         leader_node_id: String,
         /// Term of the leader
-        term: usize
+        term: usize,
     },
     /// Add a new node
     ControlAddNode(T),
