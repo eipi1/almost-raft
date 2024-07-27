@@ -1,4 +1,4 @@
-use crate::{log_error, Message, Node, NodeState};
+use crate::{log_error, ClusterNode, Message, NodeState};
 use futures_util::stream::FuturesUnordered;
 use log::{debug, error, info, trace};
 use rand::Rng;
@@ -16,8 +16,8 @@ use tokio_stream::StreamExt;
 
 /// Current state of the Raft
 #[derive(Debug)]
-pub struct RaftElectionState<T> {
-    self_id: String,
+pub struct RaftElectionState<T: ClusterNode> {
+    self_id: T::NodeIdType,
     election_timeout: u64,
     node_state: NodeState,
     votes: usize,
@@ -25,7 +25,7 @@ pub struct RaftElectionState<T> {
     peers: Vec<T>, //maybe a better choice
     voted_for_term: bool,
     has_leader: bool,
-    leader_node: Option<String>,
+    leader_node: Option<T::NodeIdType>,
     tx: Sender<Message<T>>,
     incoming_tx: Sender<Message<T>>,
     incoming_rx: Arc<RwLock<Receiver<Message<T>>>>,
@@ -36,7 +36,7 @@ pub struct RaftElectionState<T> {
     min_node: usize,
 }
 
-impl<T: Node> RaftElectionState<T> {
+impl<T: ClusterNode> RaftElectionState<T> {
     /// Initiate Raft election. This method doesn't start the election.
     /// # Arguments
     /// * `self_id` - Identifier of this node
@@ -53,7 +53,7 @@ impl<T: Node> RaftElectionState<T> {
     /// Tuple - the initialized `RaftElectionState` & a Sender of mpsc channel for incoming control messages
     #[allow(clippy::too_many_arguments)]
     pub fn init(
-        self_id: String,
+        self_id: T::NodeIdType,
         election_timeout: u64,
         heartbeat_interval: u64,
         message_timeout: u64,
@@ -89,7 +89,7 @@ impl<T: Node> RaftElectionState<T> {
 
 /// Start the election process.
 /// Note that, the function has a infinite loop, so will never return.
-pub async fn raft_election<T: Node + Debug>(mut state: RaftElectionState<T>) {
+pub async fn raft_election<T: ClusterNode + Debug>(mut state: RaftElectionState<T>) {
     info!("[node: {}] starting election process...", &state.self_id);
     let incoming = state.incoming_rx.clone();
     let mut remaining_election_timeout = state.election_timeout;
@@ -190,7 +190,7 @@ fn get_current_timeout(
     }
 }
 
-async fn do_leader_stuff<T: Node>(state: &RaftElectionState<T>) {
+async fn do_leader_stuff<T: ClusterNode>(state: &RaftElectionState<T>) {
     let heartbeat_fut = send_heartbeat(&state);
     let result =
         tokio::time::timeout(Duration::from_millis(state.message_timeout), heartbeat_fut).await;
@@ -199,7 +199,7 @@ async fn do_leader_stuff<T: Node>(state: &RaftElectionState<T>) {
     }
 }
 
-async fn be_a_leader<T: Node>(state: &mut RaftElectionState<T>) {
+async fn be_a_leader<T: ClusterNode>(state: &mut RaftElectionState<T>) {
     debug!(
         "[node: {}] updating node state to NodeState::Leader",
         &state.self_id
@@ -223,7 +223,7 @@ async fn be_a_leader<T: Node>(state: &mut RaftElectionState<T>) {
     do_leader_stuff(state).await;
 }
 
-async fn send_heartbeat<T: Node>(state: &RaftElectionState<T>) {
+async fn send_heartbeat<T: ClusterNode>(state: &RaftElectionState<T>) {
     let mut messages = FuturesUnordered::new();
     for peer in state.peers.iter() {
         let msg = peer.send_message(Message::HeartBeat {
@@ -237,10 +237,16 @@ async fn send_heartbeat<T: Node>(state: &RaftElectionState<T>) {
     }
 }
 
-async fn handle_after_timeout<T: Node + Debug>(state: &mut RaftElectionState<T>) {
+async fn handle_after_timeout<T: ClusterNode + Debug>(state: &mut RaftElectionState<T>) {
     //don't start election there isn't enough nodes.
-    if state.peers.len() < state.min_node {
-        trace!("[node: {}] not enough node", &state.self_id);
+    let current_node_count = state.peers.len();
+    if current_node_count < state.min_node {
+        trace!(
+            "[node: {}] not enough node - required: {}, found: {}",
+            &state.self_id,
+            state.min_node,
+            current_node_count
+        );
         return;
     }
 
@@ -274,7 +280,7 @@ async fn handle_after_timeout<T: Node + Debug>(state: &mut RaftElectionState<T>)
         //ask peers to vote
         for peer in state.peers.iter() {
             let msg = Message::RequestVote {
-                node_id: state.self_id.clone(),
+                requester_node_id: state.self_id.clone(),
                 term: state.term,
             };
             trace!(
@@ -286,7 +292,7 @@ async fn handle_after_timeout<T: Node + Debug>(state: &mut RaftElectionState<T>)
             peer.send_message(msg).await;
         }
     }
-    if state.votes > (state.peers.len() + 1) / 2 {
+    if state.votes > (current_node_count + 1) / 2 {
         state.node_state = NodeState::Leader;
         // for peer in state.peers.iter() {
         //     peer.send_message(Message::LeaderAnnouncement(state.self_id.clone()))
@@ -303,7 +309,7 @@ async fn handle_after_timeout<T: Node + Debug>(state: &mut RaftElectionState<T>)
     }
 }
 
-async fn handle_message<T: Node + Debug>(
+async fn handle_message<T: ClusterNode + Debug>(
     state: &mut RaftElectionState<T>,
     msg: Option<Message<T>>,
 ) -> bool {
@@ -318,7 +324,10 @@ async fn handle_message<T: Node + Debug>(
                 handle_heartbeat(state, leader_node_id, term).await;
                 heartbeat = true;
             }
-            Message::RequestVote { node_id, term } => {
+            Message::RequestVote {
+                requester_node_id: node_id,
+                term,
+            } => {
                 handle_request_vote(state, node_id, term).await;
             }
             Message::RequestVoteResponse { term, vote } => {
@@ -337,7 +346,7 @@ async fn handle_message<T: Node + Debug>(
 }
 
 #[inline]
-fn handle_remove_node<T: Node>(state: &mut RaftElectionState<T>, node: T) {
+fn handle_remove_node<T: ClusterNode>(state: &mut RaftElectionState<T>, node: T) {
     if node.node_id() == &state.self_id {
         info!("[node: {}] terminating node", &state.self_id);
         state.node_state = NodeState::Terminating;
@@ -360,11 +369,15 @@ fn handle_remove_node<T: Node>(state: &mut RaftElectionState<T>, node: T) {
 }
 
 #[inline(always)]
-fn handle_add_node<T: Node>(state: &mut RaftElectionState<T>, node: T) {
+fn handle_add_node<T: ClusterNode>(state: &mut RaftElectionState<T>, node: T) {
     state.peers.push(node);
 }
 
-async fn handle_vote_response<T: Node>(state: &mut RaftElectionState<T>, term: usize, vote: bool) {
+async fn handle_vote_response<T: ClusterNode>(
+    state: &mut RaftElectionState<T>,
+    term: usize,
+    vote: bool,
+) {
     if term != state.term || !matches!(state.node_state, NodeState::Candidate) || !vote {
         // reject vote
         return;
@@ -376,9 +389,9 @@ async fn handle_vote_response<T: Node>(state: &mut RaftElectionState<T>, term: u
     }
 }
 
-async fn handle_heartbeat<T: Node>(
+async fn handle_heartbeat<T: ClusterNode>(
     state: &mut RaftElectionState<T>,
-    leader_node_id: String,
+    leader_node_id: T::NodeIdType,
     term: usize,
 ) {
     if state.term > term && matches!(state.node_state, NodeState::Follower) {
@@ -423,9 +436,9 @@ async fn handle_heartbeat<T: Node>(
     log_error!(result);
 }
 
-async fn handle_request_vote<T: Node>(
+async fn handle_request_vote<T: ClusterNode>(
     state: &mut RaftElectionState<T>,
-    requester_node_id: String,
+    requester_node_id: T::NodeIdType,
     term: usize,
 ) {
     if matches!(state.node_state, NodeState::Candidate) {
@@ -458,9 +471,9 @@ async fn handle_request_vote<T: Node>(
     send_vote(state, requester_node_id, term).await;
 }
 
-async fn send_vote<T: Node>(
+async fn send_vote<T: ClusterNode>(
     state: &mut RaftElectionState<T>,
-    requester_node_id: String,
+    requester_node_id: T::NodeIdType,
     term: usize,
 ) {
     for peer in state.peers.iter() {
@@ -487,7 +500,7 @@ async fn send_vote<T: Node>(
 #[allow(unused_variables)]
 mod test {
     use crate::election::{raft_election, RaftElectionState};
-    use crate::{Message, Node, NodeState};
+    use crate::{ClusterNode, Message, NodeState};
     use async_trait::async_trait;
     use log::trace;
     use rand::Rng;
@@ -523,7 +536,7 @@ mod test {
     }
 
     #[async_trait]
-    impl Node for NodeDummy {
+    impl ClusterNode for NodeDummy {
         type NodeType = NodeDummy;
         async fn send_message(&self, msg: Message<Self::NodeType>) {
             trace!("[node: {}] sending message {:?}", self.id, &msg);
@@ -713,7 +726,11 @@ mod test {
         let msg = msg.unwrap();
         assert!(matches!(&msg, Message::RequestVote { .. }));
         trace!("multi-term: {:?}", msg);
-        if let Message::RequestVote { term, node_id } = msg {
+        if let Message::RequestVote {
+            term,
+            requester_node_id: node_id,
+        } = msg
+        {
             assert_eq!(term, 2);
         } else {
             panic!("Wrong message.");

@@ -96,6 +96,8 @@ pub mod election;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::fmt::{Debug, Display};
+use std::hash::Hash;
 
 /// States of the node
 #[derive(Debug, PartialEq)]
@@ -112,28 +114,33 @@ pub enum NodeState {
 
 /// A Cluster node
 #[async_trait]
-pub trait Node {
+pub trait ClusterNode {
     /// concrete node type
-    type NodeType;
+    type NodeType: Debug;
+    type NodeIdType: Display + Clone + Debug + PartialEq + From<String> + Eq + Hash + Send + ToString;
     /// send message to the node
-    async fn send_message(&self, msg: Message<Self::NodeType>);
+    async fn send_message(&self, msg: Message<Self>)
+    where
+        Self: Sized;
     /// unique node identifier
-    fn node_id(&self) -> &String;
+    fn node_id(&self) -> &Self::NodeIdType;
 
-    /// Provide implementation to get id provided by service discovery provider(e.g. Kubernetes).
-    /// By default this function is an alias to [`Self::node_id`]
-    fn service_instance_id(&self) -> &String {
-        self.node_id()
-    }
+    // Provide implementation to get id provided by service discovery provider(e.g. Kubernetes).
+    // By default this function is an alias to [`Self::node_id`]
+    // #[deprecated]
+    // fn service_instance_id(&self) -> &String {
+    //     //todo remove this method, raft shouldn't have anything related to discovery service
+    //     self.node_id()
+    // }
 }
 
 /// Messages to communicate with Raft
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Message<T> {
+pub enum Message<T: ClusterNode> {
     /// Asking for vote from other nodes for term
     RequestVote {
         /// Sender node id
-        node_id: String,
+        requester_node_id: T::NodeIdType,
         /// raft election term
         term: usize,
     },
@@ -147,7 +154,7 @@ pub enum Message<T> {
     /// Heartbeat message
     HeartBeat {
         /// Current leader, i.e. message sender's node ID
-        leader_node_id: String,
+        leader_node_id: T::NodeIdType,
         /// Term of the leader
         term: usize,
     },
@@ -156,7 +163,7 @@ pub enum Message<T> {
     /// Remove an existing node, removing self will cause node termination
     ControlRemoveNode(T),
     /// A leader has been elected or change of existing one
-    ControlLeaderChanged(String),
+    ControlLeaderChanged(T::NodeIdType),
 }
 
 #[doc(hidden)]
