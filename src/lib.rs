@@ -117,7 +117,7 @@ pub enum NodeState {
 pub trait ClusterNode {
     /// concrete node type
     type NodeType: Debug;
-    type NodeIdType: Display + Clone + Debug + PartialEq + From<String> + Eq + Hash + ToString + Send + Sync;
+    type NodeIdType: Display + Clone + Debug + PartialEq + From<String> + Eq + Hash + Send + Sync;
     /// send message to the node
     async fn send_message(&self, msg: Message<Self>)
     where
