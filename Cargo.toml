@@ -1,8 +1,9 @@
 [package]
 name = "almost-raft"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Md Sarowar Alam <sarowar.cse@gmail.com>"]
 edition = "2018"
+rust-version = "1.70"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/eipi1/almost-raft"
