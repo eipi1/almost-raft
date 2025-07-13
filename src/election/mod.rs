@@ -517,10 +517,10 @@ mod test {
 
     fn setup() {
         ONCE.call_once(|| {
-            tracing_subscriber::fmt()
-                .with_env_filter("trace")
-                .try_init()
-                .unwrap();
+            env_logger::Builder::from_env(
+                env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "trace"))
+                .format_timestamp(Some(env_logger::TimestampPrecision::Millis))
+                .init();
         });
     }
 
