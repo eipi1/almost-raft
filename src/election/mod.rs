@@ -41,7 +41,7 @@ impl<T: ClusterNode> RaftElectionState<T> {
     /// Initiate Raft election. This method doesn't start the election.
     /// # Arguments
     /// * `self_id` - Identifier of this node
-    /// * `election_timeout` - Time between the elections if no heartbeat is received. Will use a 
+    /// * `election_timeout` - Time between the elections if no heartbeat is received. Will use a
     ///   randomized value in range `[election_timeout..election_timeout*2]`
     /// * `heartbeat_interval` - Interval between heartbeat message
     /// * `message_timeout` - Timout before treating message sending as failure
@@ -893,7 +893,7 @@ mod test {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn init_raft_fixed_timeout<T: ClusterNode<NodeIdType=String>>(
+    fn init_raft_fixed_timeout<T: ClusterNode<NodeIdType = String>>(
         self_id: String,
         timeout: u64,
         heartbeat_interval: u64,
