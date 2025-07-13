@@ -63,7 +63,7 @@ impl<T: ClusterNode> RaftElectionState<T> {
         max_node: usize,
         min_node: usize,
     ) -> (Self, Sender<Message<T>>) {
-        let timeout = rand::thread_rng().gen_range(election_timeout..election_timeout * 2);
+        let timeout = rand::rng().random_range(election_timeout..election_timeout * 2);
         let (incoming, rx) = channel(max_node * 2);
         (
             RaftElectionState {
