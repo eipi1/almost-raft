@@ -1,8 +1,9 @@
 [package]
 name = "almost-raft"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Md Sarowar Alam <sarowar.cse@gmail.com>"]
-edition = "2018"
+edition = "2021"
+rust-version = "1.70"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/eipi1/almost-raft"
@@ -13,10 +14,10 @@ categories = ["algorithms", "network-programming"]
 keywords = ["cluster", "distributed-system", "raft", "consensus"]
 
 [dependencies.rand]
-version = "0.8"
+version = "0.9"
 
 [dependencies.tokio]
-version = "1.9"
+version = "1.43"
 features = ["time", "sync", "test-util", "macros", "rt"]
 
 [dependencies.tokio-stream]
@@ -35,9 +36,9 @@ features = ["derive"]
 [dependencies.log]
 version = "0.4"
 
-[dev-dependencies.tracing-subscriber]
-version = "0.2"
+[dev-dependencies.env_logger]
+version = "0.11"
 
 [dev-dependencies.uuid]
-version = "0.8"
+version = "1.17"
 features = ["v4"]

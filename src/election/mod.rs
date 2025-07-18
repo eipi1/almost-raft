@@ -1,4 +1,4 @@
-use crate::{log_error, Message, Node, NodeState};
+use crate::{log_error, ClusterNode, Message, NodeState};
 use futures_util::stream::FuturesUnordered;
 use log::{debug, error, info, trace};
 use rand::Rng;
@@ -16,8 +16,8 @@ use tokio_stream::StreamExt;
 
 /// Current state of the Raft
 #[derive(Debug)]
-pub struct RaftElectionState<T> {
-    self_id: String,
+pub struct RaftElectionState<T: ClusterNode> {
+    self_id: T::NodeIdType,
     election_timeout: u64,
     node_state: NodeState,
     votes: usize,
@@ -25,8 +25,9 @@ pub struct RaftElectionState<T> {
     peers: Vec<T>, //maybe a better choice
     voted_for_term: bool,
     has_leader: bool,
-    leader_node: Option<String>,
+    leader_node: Option<T::NodeIdType>,
     tx: Sender<Message<T>>,
+    #[allow(dead_code)]
     incoming_tx: Sender<Message<T>>,
     incoming_rx: Arc<RwLock<Receiver<Message<T>>>>,
     heartbeat_interval: u64,
@@ -36,12 +37,12 @@ pub struct RaftElectionState<T> {
     min_node: usize,
 }
 
-impl<T: Node> RaftElectionState<T> {
+impl<T: ClusterNode> RaftElectionState<T> {
     /// Initiate Raft election. This method doesn't start the election.
     /// # Arguments
     /// * `self_id` - Identifier of this node
     /// * `election_timeout` - Time between the elections if no heartbeat is received. Will use a
-    ///                         randomized value in range `[election_timeout..election_timeout*2]`
+    ///   randomized value in range `[election_timeout..election_timeout*2]`
     /// * `heartbeat_interval` - Interval between heartbeat message
     /// * `message_timeout` - Timout before treating message sending as failure
     /// * `peers` - other nodes
@@ -53,7 +54,7 @@ impl<T: Node> RaftElectionState<T> {
     /// Tuple - the initialized `RaftElectionState` & a Sender of mpsc channel for incoming control messages
     #[allow(clippy::too_many_arguments)]
     pub fn init(
-        self_id: String,
+        self_id: T::NodeIdType,
         election_timeout: u64,
         heartbeat_interval: u64,
         message_timeout: u64,
@@ -62,7 +63,7 @@ impl<T: Node> RaftElectionState<T> {
         max_node: usize,
         min_node: usize,
     ) -> (Self, Sender<Message<T>>) {
-        let timeout = rand::thread_rng().gen_range(election_timeout..election_timeout * 2);
+        let timeout = rand::rng().random_range(election_timeout..election_timeout * 2);
         let (incoming, rx) = channel(max_node * 2);
         (
             RaftElectionState {
@@ -89,7 +90,7 @@ impl<T: Node> RaftElectionState<T> {
 
 /// Start the election process.
 /// Note that, the function has a infinite loop, so will never return.
-pub async fn raft_election<T: Node + Debug>(mut state: RaftElectionState<T>) {
+pub async fn raft_election<T: ClusterNode + Debug>(mut state: RaftElectionState<T>) {
     info!("[node: {}] starting election process...", &state.self_id);
     let incoming = state.incoming_rx.clone();
     let mut remaining_election_timeout = state.election_timeout;
@@ -190,8 +191,8 @@ fn get_current_timeout(
     }
 }
 
-async fn do_leader_stuff<T: Node>(state: &RaftElectionState<T>) {
-    let heartbeat_fut = send_heartbeat(&state);
+async fn do_leader_stuff<T: ClusterNode>(state: &RaftElectionState<T>) {
+    let heartbeat_fut = send_heartbeat(state);
     let result =
         tokio::time::timeout(Duration::from_millis(state.message_timeout), heartbeat_fut).await;
     if let Err(_e) = result {
@@ -199,7 +200,7 @@ async fn do_leader_stuff<T: Node>(state: &RaftElectionState<T>) {
     }
 }
 
-async fn be_a_leader<T: Node>(state: &mut RaftElectionState<T>) {
+async fn be_a_leader<T: ClusterNode>(state: &mut RaftElectionState<T>) {
     debug!(
         "[node: {}] updating node state to NodeState::Leader",
         &state.self_id
@@ -223,7 +224,7 @@ async fn be_a_leader<T: Node>(state: &mut RaftElectionState<T>) {
     do_leader_stuff(state).await;
 }
 
-async fn send_heartbeat<T: Node>(state: &RaftElectionState<T>) {
+async fn send_heartbeat<T: ClusterNode>(state: &RaftElectionState<T>) {
     let mut messages = FuturesUnordered::new();
     for peer in state.peers.iter() {
         let msg = peer.send_message(Message::HeartBeat {
@@ -237,10 +238,16 @@ async fn send_heartbeat<T: Node>(state: &RaftElectionState<T>) {
     }
 }
 
-async fn handle_after_timeout<T: Node + Debug>(state: &mut RaftElectionState<T>) {
+async fn handle_after_timeout<T: ClusterNode + Debug>(state: &mut RaftElectionState<T>) {
     //don't start election there isn't enough nodes.
-    if state.peers.len() < state.min_node {
-        trace!("[node: {}] not enough node", &state.self_id);
+    let current_node_count = state.peers.len();
+    if current_node_count < state.min_node {
+        trace!(
+            "[node: {}] not enough node - required: {}, found: {}",
+            &state.self_id,
+            state.min_node,
+            current_node_count
+        );
         return;
     }
 
@@ -274,7 +281,7 @@ async fn handle_after_timeout<T: Node + Debug>(state: &mut RaftElectionState<T>)
         //ask peers to vote
         for peer in state.peers.iter() {
             let msg = Message::RequestVote {
-                node_id: state.self_id.clone(),
+                requester_node_id: state.self_id.clone(),
                 term: state.term,
             };
             trace!(
@@ -286,7 +293,7 @@ async fn handle_after_timeout<T: Node + Debug>(state: &mut RaftElectionState<T>)
             peer.send_message(msg).await;
         }
     }
-    if state.votes > (state.peers.len() + 1) / 2 {
+    if state.votes > (current_node_count + 1) / 2 {
         state.node_state = NodeState::Leader;
         // for peer in state.peers.iter() {
         //     peer.send_message(Message::LeaderAnnouncement(state.self_id.clone()))
@@ -303,7 +310,7 @@ async fn handle_after_timeout<T: Node + Debug>(state: &mut RaftElectionState<T>)
     }
 }
 
-async fn handle_message<T: Node + Debug>(
+async fn handle_message<T: ClusterNode + Debug>(
     state: &mut RaftElectionState<T>,
     msg: Option<Message<T>>,
 ) -> bool {
@@ -318,7 +325,10 @@ async fn handle_message<T: Node + Debug>(
                 handle_heartbeat(state, leader_node_id, term).await;
                 heartbeat = true;
             }
-            Message::RequestVote { node_id, term } => {
+            Message::RequestVote {
+                requester_node_id: node_id,
+                term,
+            } => {
                 handle_request_vote(state, node_id, term).await;
             }
             Message::RequestVoteResponse { term, vote } => {
@@ -337,7 +347,7 @@ async fn handle_message<T: Node + Debug>(
 }
 
 #[inline]
-fn handle_remove_node<T: Node>(state: &mut RaftElectionState<T>, node: T) {
+fn handle_remove_node<T: ClusterNode>(state: &mut RaftElectionState<T>, node: T) {
     if node.node_id() == &state.self_id {
         info!("[node: {}] terminating node", &state.self_id);
         state.node_state = NodeState::Terminating;
@@ -360,11 +370,15 @@ fn handle_remove_node<T: Node>(state: &mut RaftElectionState<T>, node: T) {
 }
 
 #[inline(always)]
-fn handle_add_node<T: Node>(state: &mut RaftElectionState<T>, node: T) {
+fn handle_add_node<T: ClusterNode>(state: &mut RaftElectionState<T>, node: T) {
     state.peers.push(node);
 }
 
-async fn handle_vote_response<T: Node>(state: &mut RaftElectionState<T>, term: usize, vote: bool) {
+async fn handle_vote_response<T: ClusterNode>(
+    state: &mut RaftElectionState<T>,
+    term: usize,
+    vote: bool,
+) {
     if term != state.term || !matches!(state.node_state, NodeState::Candidate) || !vote {
         // reject vote
         return;
@@ -376,9 +390,9 @@ async fn handle_vote_response<T: Node>(state: &mut RaftElectionState<T>, term: u
     }
 }
 
-async fn handle_heartbeat<T: Node>(
+async fn handle_heartbeat<T: ClusterNode>(
     state: &mut RaftElectionState<T>,
-    leader_node_id: String,
+    leader_node_id: T::NodeIdType,
     term: usize,
 ) {
     if state.term > term && matches!(state.node_state, NodeState::Follower) {
@@ -423,9 +437,9 @@ async fn handle_heartbeat<T: Node>(
     log_error!(result);
 }
 
-async fn handle_request_vote<T: Node>(
+async fn handle_request_vote<T: ClusterNode>(
     state: &mut RaftElectionState<T>,
-    requester_node_id: String,
+    requester_node_id: T::NodeIdType,
     term: usize,
 ) {
     if matches!(state.node_state, NodeState::Candidate) {
@@ -458,9 +472,9 @@ async fn handle_request_vote<T: Node>(
     send_vote(state, requester_node_id, term).await;
 }
 
-async fn send_vote<T: Node>(
+async fn send_vote<T: ClusterNode>(
     state: &mut RaftElectionState<T>,
-    requester_node_id: String,
+    requester_node_id: T::NodeIdType,
     term: usize,
 ) {
     for peer in state.peers.iter() {
@@ -487,7 +501,7 @@ async fn send_vote<T: Node>(
 #[allow(unused_variables)]
 mod test {
     use crate::election::{raft_election, RaftElectionState};
-    use crate::{Message, Node, NodeState};
+    use crate::{ClusterNode, Message, NodeState};
     use async_trait::async_trait;
     use log::trace;
     use rand::Rng;
@@ -503,16 +517,16 @@ mod test {
 
     fn setup() {
         ONCE.call_once(|| {
-            tracing_subscriber::fmt()
-                .with_env_filter("trace")
-                .try_init()
-                .unwrap();
+            env_logger::Builder::from_env(
+                env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "trace"))
+                .format_timestamp(Some(env_logger::TimestampPrecision::Millis))
+                .init();
         });
     }
 
     macro_rules! d {
         ($ex:expr) => {
-            Duration::from_millis($ex);
+            Duration::from_millis($ex)
         };
     }
 
@@ -523,11 +537,12 @@ mod test {
     }
 
     #[async_trait]
-    impl Node for NodeDummy {
+    impl ClusterNode for NodeDummy {
+        type NodeIdType = String;
         type NodeType = NodeDummy;
         async fn send_message(&self, msg: Message<Self::NodeType>) {
             trace!("[node: {}] sending message {:?}", self.id, &msg);
-            self.sender.send(msg).await;
+            let _ = self.sender.send(msg).await;
         }
 
         fn node_id(&self) -> &String {
@@ -557,16 +572,16 @@ mod test {
         pause();
         let handle = tokio::spawn(raft_election(state));
         trace!("{}", timeout);
-        task::yield_now().await;
+        let _ = task::yield_now().await;
         advance(d!(timeout)).await;
         let (tx_node, mut rx_node) = channel(10);
 
         // add node
         let dummy = new_node("1", tx_node.clone());
-        tx.send(Message::ControlAddNode(dummy)).await;
+        let _ = tx.send(Message::ControlAddNode(dummy)).await;
         let dummy = new_node("2", tx_node.clone());
-        tx.send(Message::ControlAddNode(dummy)).await;
-        task::yield_now().await;
+        let _ = tx.send(Message::ControlAddNode(dummy)).await;
+        let _ = task::yield_now().await;
         advance(d!(timeout)).await;
         resume();
         // not enough node, shouldn't be any request for vote
@@ -575,8 +590,8 @@ mod test {
 
         pause();
         let dummy = new_node("3", tx_node.clone());
-        tx.send(Message::ControlAddNode(dummy)).await;
-        task::yield_now().await;
+        let _ = tx.send(Message::ControlAddNode(dummy)).await;
+        let _ = task::yield_now().await;
         advance(d!(timeout)).await;
         resume();
         // enough node, node should get request for vote
@@ -616,7 +631,7 @@ mod test {
         let timeout = state.election_timeout;
         pause();
         tokio::spawn(raft_election(state));
-        task::yield_now().await;
+        let _ = task::yield_now().await;
         advance(d!(timeout)).await;
         resume();
 
@@ -628,19 +643,19 @@ mod test {
         }
 
         // send vote
-        tx_to_raft
+        let _ = tx_to_raft
             .send(Message::RequestVoteResponse {
                 vote: true,
                 term: 1,
             })
             .await;
-        tx_to_raft
+        let _ = tx_to_raft
             .send(Message::RequestVoteResponse {
                 vote: true,
                 term: 1,
             })
             .await;
-        tx_to_raft
+        let _ = tx_to_raft
             .send(Message::RequestVoteResponse {
                 vote: true,
                 term: 1,
@@ -689,7 +704,7 @@ mod test {
         let timeout = state.election_timeout;
         pause();
         tokio::spawn(raft_election(state));
-        task::yield_now().await;
+        let _ = task::yield_now().await;
         advance(d!(timeout)).await;
         resume();
         //should get four request
@@ -698,13 +713,13 @@ mod test {
         }
         // send 1 vote, it'll be 2(self+1), not majority
         pause();
-        tx_to_raft
+        let _ = tx_to_raft
             .send(Message::RequestVoteResponse {
                 vote: true,
                 term: 1,
             })
             .await;
-        task::yield_now().await;
+        let _ = task::yield_now().await;
         advance(d!(timeout)).await;
         resume();
 
@@ -713,7 +728,11 @@ mod test {
         let msg = msg.unwrap();
         assert!(matches!(&msg, Message::RequestVote { .. }));
         trace!("multi-term: {:?}", msg);
-        if let Message::RequestVote { term, node_id } = msg {
+        if let Message::RequestVote {
+            term,
+            requester_node_id: node_id,
+        } = msg
+        {
             assert_eq!(term, 2);
         } else {
             panic!("Wrong message.");
@@ -727,7 +746,7 @@ mod test {
         }
 
         for _i in 0..2 {
-            tx_to_raft
+            let _ = tx_to_raft
                 .send(Message::RequestVoteResponse {
                     vote: true,
                     term: 2,
@@ -788,38 +807,38 @@ mod test {
         tokio::spawn(raft_election(state_3));
 
         //add raft-node to other node
-        tx_to_raft_node_1
+        let _ = tx_to_raft_node_1
             .send(Message::ControlAddNode(new_node(
                 self_id_2.as_str(),
                 tx_to_raft_node_2.clone(),
             )))
             .await;
-        tx_to_raft_node_1
+        let _ = tx_to_raft_node_1
             .send(Message::ControlAddNode(new_node(
                 self_id_3.as_str(),
                 tx_to_raft_node_3.clone(),
             )))
             .await;
 
-        tx_to_raft_node_2
+        let _ = tx_to_raft_node_2
             .send(Message::ControlAddNode(new_node(
                 self_id_1.as_str(),
                 tx_to_raft_node_1.clone(),
             )))
             .await;
-        tx_to_raft_node_2
+        let _ = tx_to_raft_node_2
             .send(Message::ControlAddNode(new_node(
                 self_id_3.as_str(),
                 tx_to_raft_node_3.clone(),
             )))
             .await;
-        tx_to_raft_node_3
+        let _ = tx_to_raft_node_3
             .send(Message::ControlAddNode(new_node(
                 self_id_1.as_str(),
                 tx_to_raft_node_1.clone(),
             )))
             .await;
-        tx_to_raft_node_3
+        let _ = tx_to_raft_node_3
             .send(Message::ControlAddNode(new_node(
                 self_id_2.as_str(),
                 tx_to_raft_node_2.clone(),
@@ -831,18 +850,16 @@ mod test {
         let msg = from_raft_node_1.recv().await;
         if let Some(msg) = msg {
             trace!("{:?}", &msg);
-            match msg {
-                Message::ControlLeaderChanged(id) => {
-                    assert_eq!(id, self_id_1);
-                }
-                _ => {}
+            if let Message::ControlLeaderChanged(id) = msg {
+                assert_eq!(id, self_id_1);
             }
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn create_raft_node_fixed_timeout(
         self_id: String,
-        nodes: &Vec<NodeDummy>,
+        nodes: &[NodeDummy],
         election_timeout: u64,
         heartbeat_interval: u64,
         heartbeat_timeout: u64,
@@ -860,7 +877,7 @@ mod test {
             election_timeout,
             heartbeat_interval,
             heartbeat_timeout,
-            nodes.clone(),
+            nodes.to_owned(),
             tx_node_1.clone(),
             max_node,
             min_node,
@@ -875,7 +892,8 @@ mod test {
         }
     }
 
-    fn init_raft_fixed_timeout<T>(
+    #[allow(clippy::too_many_arguments)]
+    fn init_raft_fixed_timeout<T: ClusterNode<NodeIdType = String>>(
         self_id: String,
         timeout: u64,
         heartbeat_interval: u64,
