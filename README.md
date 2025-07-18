@@ -100,6 +100,6 @@ from_raft.recv().await;
 ```
 
 [crates-badge]: https://img.shields.io/crates/v/almost-raft.svg
-[crates-url]: https://crates.io/crates/cluster-mode
+[crates-url]: https://crates.io/crates/almost-raft
 [mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
-[mit-url]: https://github.com/tokio-rs/tokio/blob/master/LICENSE
+[mit-url]: https://github.com/eipi1/almost-raft/blob/master/LICENSE
