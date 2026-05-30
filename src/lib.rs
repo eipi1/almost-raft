@@ -100,16 +100,30 @@ use std::fmt::{Debug, Display};
 use std::hash::Hash;
 
 /// States of the node
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum NodeState {
     /// Initial or the normal state of the node
     Follower,
+    /// Node is dry-running election and calling for pre-votes
+    PreCandidate,
     /// Node is holding an election and calling for votes
     Candidate,
     /// Node won the election with majority votes and became leader
     Leader,
     /// Node is terminating
     Terminating,
+}
+
+impl Display for NodeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            NodeState::Follower => write!(f, "NodeState::Follower"),
+            NodeState::PreCandidate => write!(f, "NodeState::PreCandidate"),
+            NodeState::Candidate => write!(f, "NodeState::Candidate"),
+            NodeState::Leader => write!(f, "NodeState::Leader"),
+            NodeState::Terminating => write!(f, "NodeState::Terminating"),
+        }
+    }
 }
 
 /// A Cluster node
@@ -138,6 +152,20 @@ pub trait ClusterNode {
 /// Messages to communicate with Raft
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message<T: ClusterNode> {
+    /// Asking for dry-run pre-vote from other nodes for term
+    RequestPreVote {
+        /// Sender node id
+        requester_node_id: T::NodeIdType,
+        /// raft election term
+        term: usize,
+    },
+    /// Message in response to `Message::PreVote`
+    PreVoteResponse {
+        /// raft election term for which the vote was requested for
+        term: usize,
+        /// Is voting for the `term`
+        vote: bool,
+    },
     /// Asking for vote from other nodes for term
     RequestVote {
         /// Sender node id
