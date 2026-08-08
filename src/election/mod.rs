@@ -96,6 +96,19 @@ impl<T: ClusterNode> RaftElectionState<T> {
     }
 }
 
+macro_rules! min_node_or_return {
+    ($state:ident) => {
+        let current_node_count = $state.peers.len();
+        if current_node_count < $state.min_node {
+            debug!(
+                "[node: {}] not enough node - required: {}, found: {}",
+                &$state.self_id, $state.min_node, current_node_count
+            );
+            return;
+        }
+    };
+}
+
 /// Start the election process.
 /// Note that, the function has a infinite loop, so will never return.
 pub async fn raft_election<T: ClusterNode + Debug>(mut state: RaftElectionState<T>) {
@@ -143,8 +156,12 @@ pub async fn raft_election<T: ClusterNode + Debug>(mut state: RaftElectionState<
         }
         if let Ok(msg) = result {
             //got some message
-            let heartbeat = handle_message(&mut state, msg).await;
-            if heartbeat {
+            let reset_election_timeout = matches!(
+                msg,
+                Some(Message::HeartBeat { .. }) | Some(Message::RequestVote { .. })
+            );
+            handle_message(&mut state, msg).await;
+            if reset_election_timeout {
                 //if it's a heartbeat msg, reset the election timeout so that as long as
                 // node is receiving heartbeat, it'll never start election
                 state.randomize_timeout();
@@ -303,6 +320,11 @@ async fn handle_pre_vote<T: ClusterNode>(
     requester_node_id: T::NodeIdType,
     term: usize,
 ) {
+    min_node_or_return!(state);
+    // do not participate in pre-vote if already has a leader
+    if state.has_leader || (state.node_state == NodeState::Leader) {
+        return;
+    }
     let grant = term > state.term;
     for peer in state.peers.iter() {
         if peer.node_id() == &requester_node_id {
@@ -318,6 +340,7 @@ async fn handle_pre_vote_response<T: ClusterNode + Debug>(
     term: usize,
     vote: bool,
 ) {
+    min_node_or_return!(state);
     if !matches!(state.node_state, NodeState::PreCandidate) || term != state.term + 1 || !vote {
         return;
     }
@@ -330,16 +353,7 @@ async fn handle_pre_vote_response<T: ClusterNode + Debug>(
 
 async fn handle_after_timeout<T: ClusterNode + Debug>(state: &mut RaftElectionState<T>) {
     //don't start election there isn't enough nodes.
-    let current_node_count = state.peers.len();
-    if current_node_count < state.min_node {
-        trace!(
-            "[node: {}] not enough node - required: {}, found: {}",
-            &state.self_id,
-            state.min_node,
-            current_node_count
-        );
-        return;
-    }
+    min_node_or_return!(state);
 
     if state.has_leader || (state.node_state == NodeState::Leader) {
         // let's reset has_leader to false.
@@ -379,7 +393,7 @@ async fn handle_after_timeout<T: ClusterNode + Debug>(state: &mut RaftElectionSt
             peer.send_message(msg).await;
         }
     }
-    if state.votes > (current_node_count + 1) / 2 {
+    if state.votes > (state.peers.len() + 1) / 2 {
         start_real_election(state).await;
     }
 }
@@ -387,9 +401,8 @@ async fn handle_after_timeout<T: ClusterNode + Debug>(state: &mut RaftElectionSt
 async fn handle_message<T: ClusterNode + Debug>(
     state: &mut RaftElectionState<T>,
     msg: Option<Message<T>>,
-) -> bool {
+) {
     trace!("[node: {}] got message {:?}", &state.self_id, &msg);
-    let mut heartbeat = false;
     if let Some(msg) = msg {
         match msg {
             Message::HeartBeat {
@@ -397,7 +410,6 @@ async fn handle_message<T: ClusterNode + Debug>(
                 term,
             } => {
                 handle_heartbeat(state, leader_node_id, term).await;
-                heartbeat = true;
             }
             Message::RequestPreVote {
                 requester_node_id,
@@ -426,7 +438,6 @@ async fn handle_message<T: ClusterNode + Debug>(
             _ => {}
         }
     }
-    heartbeat
 }
 
 #[inline]
@@ -470,6 +481,7 @@ async fn handle_vote_response<T: ClusterNode>(
     term: usize,
     vote: bool,
 ) {
+    min_node_or_return!(state);
     if term != state.term || !matches!(state.node_state, NodeState::Candidate) || !vote {
         // reject vote
         return;
@@ -487,6 +499,7 @@ async fn handle_heartbeat<T: ClusterNode>(
     leader_node_id: T::NodeIdType,
     term: usize,
 ) {
+    min_node_or_return!(state);
     if state.term > term && matches!(state.node_state, NodeState::Follower) {
         error!("follower's term shouldn't be greater than leader.");
         return;
@@ -553,6 +566,7 @@ async fn handle_request_vote<T: ClusterNode>(
     requester_node_id: T::NodeIdType,
     term: usize,
 ) {
+    min_node_or_return!(state);
     let term_increased = term > state.term;
     if term_increased {
         debug!(
