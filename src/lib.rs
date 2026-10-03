@@ -103,6 +103,8 @@ use std::hash::Hash;
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum NodeState {
     /// Initial or the normal state of the node
+    Learner,
+    /// Node is ready to join or already joined a cluster
     Follower,
     /// Node is dry-running election and calling for pre-votes
     PreCandidate,
@@ -122,6 +124,7 @@ impl Display for NodeState {
             NodeState::Candidate => write!(f, "NodeState::Candidate"),
             NodeState::Leader => write!(f, "NodeState::Leader"),
             NodeState::Terminating => write!(f, "NodeState::Terminating"),
+            NodeState::Learner => write!(f, "NodeState::Learner"),
         }
     }
 }

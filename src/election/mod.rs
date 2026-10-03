@@ -69,15 +69,15 @@ impl<T: ClusterNode> RaftElectionState<T> {
         tx: Sender<Message<T>>,
         max_node: usize,
         min_node: usize,
-    ) -> (Self, Sender<Message<T>>) {
+    ) -> Result<(Self, Sender<Message<T>>), String> {
         let timeout = rand::rng().random_range(election_timeout..election_timeout * 2);
         let (incoming, rx) = channel(max_node * 5);
-        (
+        let ret = (
             RaftElectionState {
                 self_id,
                 election_timeout: timeout,
                 base_election_timeout: election_timeout,
-                node_state: NodeState::Follower,
+                node_state: NodeState::Learner,
                 votes: 0,
                 term: 0,
                 peers,
@@ -92,8 +92,19 @@ impl<T: ClusterNode> RaftElectionState<T> {
                 min_node,
             },
             incoming,
-        )
+        );
+        validate_timeouts(&ret.0)?;
+        Ok(ret)
     }
+}
+
+fn validate_timeouts<T: ClusterNode>(state: &RaftElectionState<T>) -> Result<(), String> {
+    if state.heartbeat_interval > (state.base_election_timeout - state.message_timeout) {
+        return Err(
+            "Heartbeat timeout should be less than (election_time - message_timeout)".to_string(),
+        );
+    }
+    Ok(())
 }
 
 macro_rules! min_node_or_return {
@@ -110,7 +121,7 @@ macro_rules! min_node_or_return {
 }
 
 /// Start the election process.
-/// Note that, the function has a infinite loop, so will never return.
+/// Note that, the function is a loop, so will not return immediately.
 pub async fn raft_election<T: ClusterNode + Debug>(mut state: RaftElectionState<T>) {
     info!("[node: {}] starting election process...", &state.self_id);
     let incoming = state.incoming_rx.clone();
@@ -321,8 +332,19 @@ async fn handle_pre_vote<T: ClusterNode>(
     term: usize,
 ) {
     min_node_or_return!(state);
-    // do not participate in pre-vote if already has a leader
-    if state.has_leader || (state.node_state == NodeState::Leader) {
+    // Leader Stickiness & Learner check:
+    // Do not grant pre-vote if node has an active leader, is a leader, or is a learner
+    if state.has_leader
+        || (state.node_state == NodeState::Leader)
+        || (state.node_state == NodeState::Learner)
+    {
+        for peer in state.peers.iter() {
+            if peer.node_id() == &requester_node_id {
+                peer.send_message(Message::PreVoteResponse { term, vote: false })
+                    .await;
+                break;
+            }
+        }
         return;
     }
     let grant = term > state.term;
@@ -365,6 +387,17 @@ async fn handle_after_timeout<T: ClusterNode + Debug>(state: &mut RaftElectionSt
     }
 
     //has no leader or initializing the raft system
+    if matches!(state.node_state, NodeState::Learner) {
+        debug!(
+            "[node: {}] election timeout in Learner state with no leader; promoting {} -> {}",
+            &state.self_id,
+            &state.node_state,
+            NodeState::Follower
+        );
+        state.node_state = NodeState::Follower;
+        return;
+    }
+
     //promote to PreCandidate first (dry run)
     if matches!(
         state.node_state,
@@ -532,6 +565,14 @@ async fn handle_heartbeat<T: ClusterNode>(
             // todo reconfirm
             return;
         }
+    } else if matches!(state.node_state, NodeState::Learner) {
+        if term >= state.term {
+            debug!(
+                "[node: {}] Learner received heartbeat; updating node state: Learner -> Follower",
+                &state.self_id
+            );
+            state.node_state = NodeState::Follower;
+        }
     }
 
     //todo review the necessity of the voted_for_term
@@ -567,6 +608,16 @@ async fn handle_request_vote<T: ClusterNode>(
     term: usize,
 ) {
     min_node_or_return!(state);
+    // Learner protection: Learners do not participate in voting
+    if state.node_state == NodeState::Learner {
+        trace!(
+            "[node: {}] is learner; rejecting RequestVote from {}",
+            &state.self_id,
+            &requester_node_id
+        );
+        return;
+    }
+
     let term_increased = term > state.term;
     if term_increased {
         debug!(
@@ -696,7 +747,7 @@ mod test {
             (100, 20, 500, 5, 3);
         let (tx, from_raft) = mpsc::channel(10);
         let self_id = uuid::Uuid::new_v4().to_string();
-        let (state, tx) = RaftElectionState::init(
+        let Ok((state, tx)) = RaftElectionState::init(
             self_id,
             election_timeout,
             heartbeat_interval,
@@ -705,7 +756,9 @@ mod test {
             tx.clone(),
             max_node,
             min_node,
-        );
+        ) else {
+            todo!()
+        };
         election_timeout = state.election_timeout;
         pause();
         let handle = tokio::spawn(raft_election(state));
@@ -732,7 +785,15 @@ mod test {
         let _ = task::yield_now().await;
         advance(d!(election_timeout)).await;
         resume();
-        // enough node, node should get request for pre-vote
+        tokio::time::sleep(d!(50)).await;
+        pause();
+        advance(d!(election_timeout*2)).await;
+        resume();
+        tokio::time::sleep(d!(50)).await;
+        pause();
+        advance(d!(election_timeout*2)).await;
+        resume();
+        tokio::time::sleep(d!(50)).await;        // enough node, node should get request for pre-vote
         let result = tokio::time::timeout(Duration::from_millis(500), rx_node.recv()).await;
         trace!("{:?}", result);
         assert!(matches!(
@@ -755,7 +816,7 @@ mod test {
             (1000, 20, 5000, 5, 3);
         let (tx, mut from_raft) = mpsc::channel(10);
         let self_id = uuid::Uuid::new_v4().to_string();
-        let (state, tx_to_raft) = RaftElectionState::init(
+        let Ok((state, tx_to_raft)) = RaftElectionState::init(
             self_id,
             timeout,
             heartbeat_interval,
@@ -764,7 +825,9 @@ mod test {
             tx.clone(),
             max_node,
             min_node,
-        );
+        ) else {
+            todo!()
+        };
 
         let timeout = state.election_timeout;
         pause();
@@ -858,7 +921,7 @@ mod test {
             (1000, 20, 5000, 5, 3);
         let (tx, mut from_raft) = mpsc::channel(10);
         let self_id = "raft-node".to_string();
-        let (state, tx_to_raft) = RaftElectionState::init(
+        let Ok((state, tx_to_raft)) = RaftElectionState::init(
             self_id,
             timeout,
             heartbeat_interval,
@@ -867,7 +930,9 @@ mod test {
             tx.clone(),
             max_node,
             min_node,
-        );
+        ) else {
+            todo!()
+        };
 
         let timeout = state.election_timeout;
         pause();
@@ -1198,7 +1263,7 @@ mod test {
                 self_id,
                 election_timeout,
                 base_election_timeout: election_timeout,
-                node_state: NodeState::Follower,
+                node_state: NodeState::Learner,
                 votes: 0,
                 term: 0,
                 peers,
@@ -1482,5 +1547,163 @@ mod test {
         assert!(result.is_err());
 
         resume();
+    }
+
+    #[tokio::test]
+    async fn test_learner_transition_on_heartbeat() {
+        setup();
+        let (tx_node, _rx_node) = channel(10);
+        let nodes = vec![new_node("1", tx_node.clone())];
+        let (heartbeat_interval, heartbeat_timeout, timeout, max_node, min_node) =
+            (1000, 20, 5000, 5, 1);
+        let (tx, _from_raft) = mpsc::channel(10);
+        let self_id = "raft-learner".to_string();
+
+        let (mut state, _tx_to_raft) = init_raft_fixed_timeout(
+            self_id,
+            timeout,
+            heartbeat_interval,
+            heartbeat_timeout,
+            nodes,
+            tx.clone(),
+            max_node,
+            min_node,
+        );
+
+        assert_eq!(state.node_state, NodeState::Learner);
+        assert!(!state.has_leader);
+
+        super::handle_heartbeat(&mut state, "1".to_string(), 1).await;
+
+        assert_eq!(state.node_state, NodeState::Follower);
+        assert!(state.has_leader);
+        assert_eq!(state.leader_node, Some("1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_learner_transition_on_timeout() {
+        setup();
+        let (tx_node, _rx_node) = channel(10);
+        let nodes = vec![new_node("1", tx_node.clone())];
+        let (heartbeat_interval, heartbeat_timeout, timeout, max_node, min_node) =
+            (1000, 20, 5000, 5, 1);
+        let (tx, _from_raft) = mpsc::channel(10);
+        let self_id = "raft-learner".to_string();
+
+        let (mut state, _tx_to_raft) = init_raft_fixed_timeout(
+            self_id,
+            timeout,
+            heartbeat_interval,
+            heartbeat_timeout,
+            nodes,
+            tx.clone(),
+            max_node,
+            min_node,
+        );
+
+        assert_eq!(state.node_state, NodeState::Learner);
+        assert!(!state.has_leader);
+
+        super::handle_after_timeout(&mut state).await;
+
+        // On timeout without leader, Learner promotes to Follower and returns without initiating pre-vote immediately
+        assert_eq!(state.node_state, NodeState::Follower);
+    }
+
+    #[tokio::test]
+    async fn test_learner_rejects_pre_vote_and_vote() {
+        setup();
+        let (tx_node, mut rx_node) = channel(10);
+        let nodes = vec![new_node("1", tx_node.clone())];
+        let (heartbeat_interval, heartbeat_timeout, timeout, max_node, min_node) =
+            (1000, 20, 5000, 5, 1);
+        let (tx, _from_raft) = mpsc::channel(10);
+        let self_id = "raft-learner".to_string();
+
+        let (mut state, _tx_to_raft) = init_raft_fixed_timeout(
+            self_id,
+            timeout,
+            heartbeat_interval,
+            heartbeat_timeout,
+            nodes,
+            tx.clone(),
+            max_node,
+            min_node,
+        );
+
+        assert_eq!(state.node_state, NodeState::Learner);
+
+        // Request PreVote to learner
+        super::handle_pre_vote(&mut state, "1".to_string(), 2).await;
+
+        let msg = rx_node.recv().await.unwrap();
+        assert!(matches!(
+            msg,
+            Message::PreVoteResponse {
+                vote: false,
+                term: 2
+            }
+        ));
+
+        // Request Vote to learner
+        super::handle_request_vote(&mut state, "1".to_string(), 2).await;
+
+        let result = tokio::time::timeout(Duration::from_millis(5), rx_node.recv()).await;
+        assert!(result.is_err(), "Learner should not send a vote response");
+    }
+
+    #[tokio::test]
+    async fn test_learner_batch_scaleup_no_disruption() {
+        setup();
+        let (tx_node, mut rx_node) = channel(50);
+        let nodes = vec![
+            new_node("1", tx_node.clone()),
+            new_node("2", tx_node.clone()),
+            new_node("3", tx_node.clone()),
+        ];
+        let (heartbeat_interval, heartbeat_timeout, timeout, max_node, min_node) =
+            (40, 2, 5000, 20, 2);
+        let (tx, _from_raft) = mpsc::channel(10);
+        let self_id = "raft-leader".to_string();
+
+        let (mut state, tx_to_raft) = init_raft_fixed_timeout(
+            self_id.clone(),
+            timeout,
+            heartbeat_interval,
+            heartbeat_timeout,
+            nodes,
+            tx.clone(),
+            max_node,
+            min_node,
+        );
+
+        state.node_state = NodeState::Leader;
+        state.term = 1;
+
+        // Batch add 8 new learner nodes
+        for i in 4..=11 {
+            let dummy = new_node(&i.to_string(), tx_node.clone());
+            let _ = tx_to_raft.send(Message::ControlAddNode(dummy)).await;
+        }
+
+        pause();
+        tokio::spawn(raft_election(state));
+        let _ = task::yield_now().await;
+
+        // Advance past heartbeat interval
+        advance(d!(50)).await;
+        resume();
+
+        // Check that leader sent heartbeats to all peers including the 8 new nodes
+        let mut heartbeats_received = 0;
+        while let Ok(Some(msg)) =
+            tokio::time::timeout(Duration::from_millis(10), rx_node.recv()).await
+        {
+            if matches!(msg, Message::HeartBeat { .. }) {
+                heartbeats_received += 1;
+            }
+        }
+        // 3 existing + 8 new = 11 peers receiving heartbeats
+        assert_eq!(heartbeats_received, 11);
     }
 }
